@@ -10,3 +10,4 @@ model = tf.keras.Model()
 model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
 model.fit(train_df, validation_data=val_df, epochs=5)
 model.evaluate(val_df)
+
