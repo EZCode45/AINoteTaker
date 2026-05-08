@@ -1,3 +1,4 @@
+import os
 import re
 
 import datasets
@@ -6,8 +7,7 @@ import torch
 from transformers import T5ForConditionalGeneration, T5Tokenizer
 
 
-MODEL_PATH = "./results/checkpoint-12000"
-FALLBACK_MODEL_PATH = "./results"
+PREFERRED_MODEL_PATHS = ("./results/checkpoint-12000", "./results")
 BASE_TOKENIZER = "t5-small"
 DEFAULT_SUMMARY_TOKENS = 120
 MIN_SUMMARY_TOKENS = 20
@@ -18,17 +18,67 @@ LONG_DOCUMENT_MIN_TOKENS = 300
 MAX_LONG_DOCUMENT_CHUNKS = 30
 
 
-try:
-    trained_model = T5ForConditionalGeneration.from_pretrained(MODEL_PATH)
-except Exception as e:
-    print(f"Warning: Could not load checkpoint-12000 ({e})")
-    print("Loading final model from ./results...")
-    trained_model = T5ForConditionalGeneration.from_pretrained(FALLBACK_MODEL_PATH)
+trained_model = None
+trained_tokenizer = None
+model_source = None
 
-# Training checkpoints usually contain model weights/config, not tokenizer files.
-# The model was trained from t5-small, so use the matching base tokenizer.
-trained_tokenizer = T5Tokenizer.from_pretrained(BASE_TOKENIZER)
-trained_model.eval()
+
+def _has_model_weights(path):
+    return any(
+        os.path.exists(os.path.join(path, filename))
+        for filename in ("model.safetensors", "pytorch_model.bin")
+    )
+
+
+def _find_local_model_path():
+    for path in PREFERRED_MODEL_PATHS:
+        if os.path.isdir(path) and _has_model_weights(path):
+            return path
+
+    checkpoints_root = "./results"
+    if not os.path.isdir(checkpoints_root):
+        return None
+
+    checkpoint_paths = []
+    for name in os.listdir(checkpoints_root):
+        path = os.path.join(checkpoints_root, name)
+        if name.startswith("checkpoint-") and os.path.isdir(path) and _has_model_weights(path):
+            try:
+                step = int(name.rsplit("-", 1)[1])
+            except (IndexError, ValueError):
+                step = -1
+            checkpoint_paths.append((step, path))
+
+    if not checkpoint_paths:
+        return None
+
+    return max(checkpoint_paths)[1]
+
+
+def _load_model():
+    global trained_model, trained_tokenizer, model_source
+
+    if trained_model is not None and trained_tokenizer is not None:
+        return
+
+    local_model_path = _find_local_model_path()
+    try:
+        if local_model_path:
+            trained_model = T5ForConditionalGeneration.from_pretrained(local_model_path)
+            model_source = local_model_path
+        else:
+            trained_model = T5ForConditionalGeneration.from_pretrained(BASE_TOKENIZER, local_files_only=True)
+            model_source = BASE_TOKENIZER
+
+        # Training checkpoints usually contain model weights/config, not tokenizer files.
+        trained_tokenizer = T5Tokenizer.from_pretrained(BASE_TOKENIZER, local_files_only=True)
+        trained_model.eval()
+    except Exception as e:
+        raise RuntimeError(
+            "Could not load a summarization model. The ./results folders do not contain "
+            "model.safetensors or pytorch_model.bin, and t5-small is not available in the "
+            f"local Transformers cache. Original error: {e}"
+        ) from e
 
 
 def _clamp_summary_length(max_length):
@@ -76,6 +126,7 @@ def _sanitize_generated_summary(summary):
 
 
 def _chunk_text(text, chunk_size=INPUT_CHUNK_TOKENS):
+    _load_model()
     token_ids = trained_tokenizer.encode(text, add_special_tokens=False)
     chunks = []
 
@@ -89,6 +140,7 @@ def _chunk_text(text, chunk_size=INPUT_CHUNK_TOKENS):
 
 
 def _generate_single_pass_summary(text, max_length):
+    _load_model()
     max_length = min(_clamp_summary_length(max_length), SINGLE_PASS_MAX_TOKENS)
     input_ids = trained_tokenizer.encode("summarize: " + text, return_tensors="pt", max_length=512, truncation=True)
 
@@ -143,6 +195,7 @@ def generate_summary(text, max_length=DEFAULT_SUMMARY_TOKENS):
     if not text or len(text.strip()) == 0:
         return "[Empty input]"
 
+    _load_model()
     max_length = _clamp_summary_length(max_length)
     input_token_count = len(trained_tokenizer.encode(text, add_special_tokens=False))
 
