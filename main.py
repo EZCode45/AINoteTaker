@@ -125,13 +125,20 @@ def _sanitize_generated_summary(summary):
     return summary.strip(" \t\r\n\"'\u2018\u2019\u201c\u201d")
 
 
-def _chunk_text(text, chunk_size=INPUT_CHUNK_TOKENS):
+def _chunk_text(text, chunk_size=INPUT_CHUNK_TOKENS, prompt_prefix="summarize: "):
     _load_model()
+
+    # Ensure each model input (prompt_prefix + chunk) stays within 512 tokens.
+    # T5 has a fixed max position embedding; if we don't reserve space for the
+    # prompt prefix, the final (prefix + chunk) may exceed the limit.
+    prompt_ids = trained_tokenizer.encode(prompt_prefix, add_special_tokens=False)
+    effective_chunk_size = max(1, int(chunk_size) - len(prompt_ids))
+
     token_ids = trained_tokenizer.encode(text, add_special_tokens=False)
     chunks = []
 
-    for start in range(0, len(token_ids), chunk_size):
-        chunk_ids = token_ids[start:start + chunk_size]
+    for start in range(0, len(token_ids), effective_chunk_size):
+        chunk_ids = token_ids[start:start + effective_chunk_size]
         chunk_text = trained_tokenizer.decode(chunk_ids, skip_special_tokens=True).strip()
         if chunk_text:
             chunks.append(chunk_text)
@@ -142,7 +149,16 @@ def _chunk_text(text, chunk_size=INPUT_CHUNK_TOKENS):
 def _generate_single_pass_summary(text, max_length):
     _load_model()
     max_length = min(_clamp_summary_length(max_length), SINGLE_PASS_MAX_TOKENS)
-    input_ids = trained_tokenizer.encode("summarize: " + text, return_tensors="pt", max_length=512, truncation=True)
+
+    # Hard-enforce the model's 512 token input limit.
+    # Using tokenizer(...) with truncation/max_length is more reliable than encode(...).
+    inputs = trained_tokenizer(
+        "summarize: " + text,
+        return_tensors="pt",
+        truncation=True,
+        max_length=INPUT_CHUNK_TOKENS,
+    )
+    input_ids = inputs["input_ids"]
 
     with torch.no_grad():
         summary_ids = trained_model.generate(
