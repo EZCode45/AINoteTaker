@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+
+# Local model checkpoints are too large for normal GitHub pushes.
+# Keep these on disk or use Git LFS/Hugging Face for sharing.
+results/
